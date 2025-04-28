@@ -1,0 +1,89 @@
+name: Security Tests
+
+on:
+  pull_request:
+    branches:
+      - '*'
+
+permissions:
+  checks: write
+  contents: read
+  id-token: write
+
+jobs:
+  security-tests:
+    runs-on: ubuntu-latest
+
+    env:
+      DB_CONNECTION: ${{ secrets.DB_CONNECTION }}
+      DB_DATABASE: ${{ secrets.DB_DATABASE }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_USERNAME: ${{ secrets.DB_USERNAME }}
+      BRIGHT_HOSTNAME: development.playground.brightsec.com
+      BRIGHT_PROJECT_ID: 5SAtMMG871UaVuWSVbchPR
+      BRIGHT_TARGET_URL: http://127.0.0.1:8000
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.0
+
+    - name: Install PHP dependencies
+      run: composer install
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '22'
+
+    - name: Install JavaScript dependencies
+      run: npm install
+
+    - name: Install SecTester dependencies
+      run: npm i --save=false --prefix .brightsec @sectester/core @sectester/repeater @sectester/scan @sectester/runner @sectester/reporter
+
+    - name: Copy .env file
+      run: cp .env.example .env
+
+    - name: Update .env file
+      run: |
+        sed -i 's/DB_CONNECTION=mysql/DB_CONNECTION=${{ secrets.DB_CONNECTION }}/' .env
+        sed -i 's/DB_DATABASE=blog/DB_DATABASE=${{ secrets.DB_DATABASE }}/' .env
+        sed -i 's/DB_USERNAME=root/DB_USERNAME=${{ secrets.DB_USERNAME }}/' .env
+        sed -i 's/DB_PASSWORD=/DB_PASSWORD=${{ secrets.DB_PASSWORD }}/' .env
+
+    - name: Create database
+      run: |
+        mysql -e 'CREATE DATABASE IF NOT EXISTS laravel_crud;'
+
+    - name: Run migrations
+      run: php artisan migrate
+
+    - name: Start Laravel server
+      run: php artisan serve &
+
+    - name: Wait for Laravel server to be ready
+      run: |
+        until nc -zv 127.0.0.1 8000; do
+          sleep 1
+        done
+
+    - name: Authenticate with Bright
+      uses: ./.github/workflows/composite/configure-bright-credentials
+      with:
+        BRIGHT_HOSTNAME: development.playground.brightsec.com
+        BRIGHT_PROJECT_ID: 5SAtMMG871UaVuWSVbchPR
+        BRIGHT_TOKEN: ${{ secrets.BRIGHT_TOKEN }}
+
+    - name: Run security tests
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        BRIGHT_TOKEN: ${{ env.BRIGHT_TOKEN }}
+      run: |
+        node --experimental-transform-types --experimental-strip-types --experimental-detect-module \
+        --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning \
+        --test-force-exit --test .brightsec/tests/*.test.ts --test-concurrency=4
